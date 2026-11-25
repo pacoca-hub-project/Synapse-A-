@@ -17,12 +17,19 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.9
+      - name: Achar e descompactar o projeto
+        run: |
+          ZIP=$(find . -name synapse_a.zip -not -path "./fonte/*" | head -1)
+          if [ -z "$ZIP" ]; then echo "synapse_a.zip nao encontrado"; ls -R; exit 1; fi
+          echo "Zip: $ZIP"
+          unzip -q -o "$ZIP" -d fonte
       - name: Compilar APK (debug)
         run: |
-          unzip -q .github/workflows/synapse_a.zip -d fonte
-          cd fonte/synapse_a
+          DIR=$(dirname "$(find fonte -name settings.gradle.kts | head -1)")
+          cd "$DIR"
           gradle assembleDebug --no-daemon
+          echo "APK_DIR=$PWD/app/build/outputs/apk/debug" >> $GITHUB_ENV
       - uses: actions/upload-artifact@v4
         with:
           name: synapse-A-debug
-          path: fonte/synapse_a/app/build/outputs/apk/debug/*.apk
+          path: ${{ env.APK_DIR }}/*.apk
