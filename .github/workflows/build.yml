@@ -18,8 +18,11 @@ jobs:
         with:
           gradle-version: 8.9
       - name: Compilar APK (debug)
-        run: gradle assembleDebug --no-daemon
+        run: |
+          unzip -q .github/workflows/synapse_a.zip -d fonte
+          cd fonte/synapse_a
+          gradle assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: synapse-A-debug
-          path: app/build/outputs/apk/debug/*.apk
+          path: fonte/synapse_a/app/build/outputs/apk/debug/*.apk
