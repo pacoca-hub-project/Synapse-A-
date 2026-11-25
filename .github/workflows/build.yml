@@ -19,8 +19,12 @@ jobs:
           gradle-version: 8.9
       - name: Achar e descompactar o projeto
         run: |
-          ZIP=$(find . -name synapse_a.zip -not -path "./fonte/*" | head -1)
-          if [ -z "$ZIP" ]; then echo "synapse_a.zip nao encontrado"; ls -R; exit 1; fi
+          ZIP=$(find . -iname "synapse_a*.zip" -not -path "./fonte/*" | head -1)
+          if [ -z "$ZIP" ]; then
+            echo "Nenhum synapse_a*.zip encontrado. Zips no repo:"
+            find . -iname "*.zip" -not -path "./.git/*"
+            exit 1
+          fi
           echo "Zip: $ZIP"
           unzip -q -o "$ZIP" -d fonte
       - name: Compilar APK (debug)
