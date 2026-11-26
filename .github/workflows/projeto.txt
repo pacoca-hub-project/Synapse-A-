@@ -105,6 +105,7 @@ dependencies {
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
@@ -936,6 +937,8 @@ import org.luaj.vm2.lib.jse.JsePlatform
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.PrintStream
+import java.net.HttpURLConnection
+import java.net.URL
 
 // ===== Cores (iguais ao script Lua) =====
 private val C12 = Color(0xFF0C0C0C)
@@ -1049,7 +1052,80 @@ class Estado(val pasta: File) {
         if (!anexado) mostrarErro("Clique em Attach primeiro para usar esta função.") else acao()
     }
 
+    private val historico = mutableListOf<Pair<String, String>>()
+
+    // Execute / Execute Clip: envia o texto para o Claude.
+    // Comandos: /key SUA_CHAVE  |  /new (nova conversa)  |  /lua código (roda Lua local)
     fun executar(codigo: String) {
+        if (codigo.isEmpty()) return
+        val t = codigo.trim()
+        when {
+            t.startsWith("/key ") -> {
+                runCatching { File(pasta, "apikey.txt").writeText(t.removePrefix("/key ").trim()) }
+                log.add("[Synapse A] chave salva")
+            }
+            t == "/new" -> {
+                historico.clear()
+                log.add("[Synapse A] nova conversa")
+            }
+            t.startsWith("/lua ") -> executarLua(t.removePrefix("/lua "))
+            else -> enviarClaude(codigo)
+        }
+    }
+
+    fun enviarClaude(msg: String) {
+        val chave = runCatching { File(pasta, "apikey.txt").readText().trim() }.getOrDefault("")
+        if (chave.isEmpty()) {
+            mostrarErro("Escreva /key SUA_CHAVE e toque em Execute para salvar a chave da API.")
+            return
+        }
+        val main = Handler(Looper.getMainLooper())
+        log.add("[você] " + msg.lines().first().take(80))
+        val hist = historico.toList() + ("user" to msg)
+        Thread {
+            var resp = ""
+            try {
+                val msgs = org.json.JSONArray()
+                hist.forEach { msgs.put(org.json.JSONObject().put("role", it.first).put("content", it.second)) }
+                val corpo = org.json.JSONObject()
+                    .put("model", "claude-sonnet-5-5")
+                    .put("max_tokens", 1024)
+                    .put("messages", msgs)
+                val c = URL("https://api.anthropic.com/v1/messages").openConnection() as HttpURLConnection
+                c.requestMethod = "POST"
+                c.connectTimeout = 15000
+                c.readTimeout = 60000
+                c.doOutput = true
+                c.setRequestProperty("content-type", "application/json")
+                c.setRequestProperty("x-api-key", chave)
+                c.setRequestProperty("anthropic-version", "2023-06-01")
+                c.outputStream.use { it.write(corpo.toString().toByteArray()) }
+                val ok = c.responseCode in 200..299
+                val txt = (if (ok) c.inputStream else c.errorStream).bufferedReader().use { it.readText() }
+                if (ok) {
+                    val arr = org.json.JSONObject(txt).getJSONArray("content")
+                    val sb = StringBuilder()
+                    for (i in 0 until arr.length()) {
+                        val b = arr.getJSONObject(i)
+                        if (b.optString("type") == "text") sb.append(b.getString("text"))
+                    }
+                    resp = sb.toString()
+                    main.post { historico.add("user" to msg); historico.add("assistant" to resp) }
+                } else {
+                    resp = "erro ${c.responseCode}: " + txt.take(200)
+                }
+            } catch (e: Throwable) {
+                resp = "erro: ${e.message}"
+            }
+            main.post {
+                resp.lines().filter { it.isNotEmpty() }.forEach { log.add("[Claude] $it") }
+                while (log.size > 50) log.removeAt(0)
+                onJanelaUi("Claude", resp)
+            }
+        }.start()
+    }
+
+    fun executarLua(codigo: String) {
         if (codigo.isEmpty()) return
         val g = JsePlatform.standardGlobals()
         val saida = ByteArrayOutputStream()
