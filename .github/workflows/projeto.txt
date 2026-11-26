@@ -1,0 +1,980 @@
+##### FILE: settings.gradle.kts
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "SynapseA"
+include(":app")
+
+##### FILE: build.gradle.kts
+plugins {
+    id("com.android.application") version "8.5.2" apply false
+    id("org.jetbrains.kotlin.android") version "2.0.20" apply false
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.20" apply false
+}
+
+##### FILE: gradle.properties
+org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+android.useAndroidX=true
+android.nonTransitiveRClass=true
+kotlin.code.style=official
+
+##### FILE: app/build.gradle.kts
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+}
+
+android {
+    namespace = "com.example.synapsea"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.example.synapsea"
+        minSdk = 24
+        targetSdk = 34
+        versionCode = 2
+        versionName = "1.0.1"
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        }
+    }
+}
+
+dependencies {
+    implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.activity:activity-compose:1.9.2")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.6")
+    implementation("androidx.lifecycle:lifecycle-viewmodel:2.8.6")
+    implementation("androidx.savedstate:savedstate-ktx:1.2.1")
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.foundation:foundation")
+    implementation("androidx.compose.material3:material3")
+    implementation("org.luaj:luaj-jse:3.0.1")
+}
+
+##### FILE: app/src/main/AndroidManifest.xml
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:allowBackup="true"
+        android:label="Synapse A"
+        android:theme="@android:style/Theme.Translucent.NoTitleBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".OverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="janela_flutuante" />
+        </service>
+
+    </application>
+</manifest>
+
+##### FILE: app/src/main/java/com/example/synapsea/Realce.kt
+package com.example.synapsea
+
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.input.OffsetMapping
+import androidx.compose.ui.text.input.TransformedText
+import androidx.compose.ui.text.input.VisualTransformation
+
+object Realce {
+    private val PALAVRAS = setOf(
+        "and", "break", "do", "else", "elseif", "end", "false", "for", "function", "goto", "if", "in",
+        "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while", "continue"
+    )
+
+    private val BUILTINS = setOf(
+        "game", "workspace", "script", "self", "print", "warn", "error", "pcall", "xpcall", "assert",
+        "pairs", "ipairs", "next", "type", "typeof", "tostring", "tonumber", "select", "unpack",
+        "require", "setmetatable", "getmetatable", "rawget", "rawset", "rawequal", "tick", "time",
+        "wait", "spawn", "delay", "task", "math", "string", "table", "os", "coroutine", "utf8",
+        "Instance", "Vector2", "Vector3", "CFrame", "Color3", "UDim", "UDim2", "Enum", "Random",
+        "shared", "_G", "_VERSION", "loadstring", "getgenv", "getrenv", "getfenv", "setfenv"
+    )
+
+    private val C_PALAVRA = Color(0xFFF86D7C)
+    private val C_BUILTIN = Color(0xFF84D6F7)
+    private val C_FUNCAO = Color(0xFFFDFBAC)
+    private val C_STRING = Color(0xFFADF195)
+    private val C_NUMERO = Color(0xFFFFC600)
+    private val C_COMENTARIO = Color(0xFF6A9955)
+
+    private const val LIMITE_REALCE = 30000
+
+    // Nível de um colchete longo ([[, [=[ ...) na posição p, ou null
+    private fun nivel(s: String, p: Int): Int? {
+        if (p >= s.length || s[p] != '[') return null
+        var k = p + 1
+        while (k < s.length && s[k] == '=') k++
+        return if (k < s.length && s[k] == '[') k - p - 1 else null
+    }
+
+    fun realcar(src: String): AnnotatedString = buildAnnotatedString {
+        append(src)
+        if (src.length > LIMITE_REALCE) return@buildAnnotatedString
+
+        val n = src.length
+        var i = 0
+        var anterior: Char? = null
+
+        while (i < n) {
+            val c = src[i]
+            var cor: Color? = null
+            val e: Int
+
+            if (src.startsWith("--", i)) {
+                cor = C_COMENTARIO
+                val eq = nivel(src, i + 2)
+                e = if (eq != null) {
+                    val fecha = "]" + "=".repeat(eq) + "]"
+                    val f = src.indexOf(fecha, i + 2)
+                    if (f < 0) n - 1 else f + fecha.length - 1
+                } else {
+                    val nl = src.indexOf('\n', i)
+                    (if (nl < 0) n else nl) - 1
+                }
+            } else if (c == '"' || c == '\'') {
+                cor = C_STRING
+                var j = i + 1
+                while (j < n) {
+                    val d = src[j]
+                    if (d == '\\') j += 2
+                    else if (d == c || d == '\n') break
+                    else j++
+                }
+                var fim = minOf(j, n - 1)
+                if (src[fim] == '\n') fim--
+                e = fim
+            } else if (c == '[' && nivel(src, i) != null) {
+                cor = C_STRING
+                val fecha = "]" + "=".repeat(nivel(src, i)!!) + "]"
+                val f = src.indexOf(fecha, i)
+                e = if (f < 0) n - 1 else f + fecha.length - 1
+            } else if (c.isDigit() || (c == '.' && i + 1 < n && src[i + 1].isDigit())) {
+                cor = C_NUMERO
+                var j = i
+                if (c == '0' && i + 1 < n && (src[i + 1] == 'x' || src[i + 1] == 'X')) {
+                    j = i + 2
+                    while (j < n && (src[j].isDigit() || src[j].lowercaseChar() in 'a'..'f')) j++
+                } else {
+                    while (j < n && src[j].isDigit()) j++
+                    if (j < n && src[j] == '.') {
+                        j++
+                        while (j < n && src[j].isDigit()) j++
+                    }
+                    if (j < n && (src[j] == 'e' || src[j] == 'E')) {
+                        var k = j + 1
+                        if (k < n && (src[k] == '+' || src[k] == '-')) k++
+                        if (k < n && src[k].isDigit()) {
+                            while (k < n && src[k].isDigit()) k++
+                            j = k
+                        }
+                    }
+                }
+                e = j - 1
+            } else if (c.isLetter() || c == '_') {
+                var j = i
+                while (j < n && (src[j].isLetterOrDigit() || src[j] == '_')) j++
+                val palavra = src.substring(i, j)
+                e = j - 1
+                cor = when {
+                    palavra in PALAVRAS -> C_PALAVRA
+                    palavra in BUILTINS && anterior != '.' -> C_BUILTIN
+                    else -> {
+                        var k = j
+                        while (k < n && src[k].isWhitespace()) k++
+                        if (k < n && src[k] == '(') C_FUNCAO else null
+                    }
+                }
+            } else {
+                e = i
+            }
+
+            if (cor != null) addStyle(SpanStyle(color = cor), i, e + 1)
+            val trecho = src.substring(i, e + 1).trimEnd()
+            if (trecho.isNotEmpty()) anterior = trecho.last()
+            i = e + 1
+        }
+    }
+}
+
+val RealceTransform = VisualTransformation { texto ->
+    TransformedText(Realce.realcar(texto.text), OffsetMapping.Identity)
+}
+
+##### FILE: app/src/main/java/com/example/synapsea/MainActivity.kt
+package com.example.synapsea
+
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.provider.Settings
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
+
+// Activity sem tela: pede as permissões, liga o serviço da janela flutuante e fecha.
+// Se a janela já estiver ativa, abrir o app de novo FECHA a janela.
+class MainActivity : ComponentActivity() {
+
+    private val pedirOverlay =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { iniciar() }
+
+    private val pedirNotificacao =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { pedirSobreposicao() }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        if (Overlay.rodando) {
+            stopService(Intent(this, OverlayService::class.java))
+            finish()
+            return
+        }
+
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            != PackageManager.PERMISSION_GRANTED
+        ) {
+            pedirNotificacao.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            pedirSobreposicao()
+        }
+    }
+
+    private fun pedirSobreposicao() {
+        if (Settings.canDrawOverlays(this)) {
+            iniciar()
+        } else {
+            Toast.makeText(this, "Ative \"Sobrepor a outros apps\" para o Synapse A", Toast.LENGTH_LONG).show()
+            pedirOverlay.launch(
+                Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+            )
+        }
+    }
+
+    private fun iniciar() {
+        if (Settings.canDrawOverlays(this)) {
+            ContextCompat.startForegroundService(this, Intent(this, OverlayService::class.java))
+        } else {
+            Toast.makeText(this, "Permissão necessária para flutuar na tela", Toast.LENGTH_LONG).show()
+        }
+        finish()
+    }
+}
+
+##### FILE: app/src/main/java/com/example/synapsea/OverlayService.kt
+package com.example.synapsea
+
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.app.Service
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.graphics.PixelFormat
+import android.os.Build
+import android.os.IBinder
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.WindowManager
+import android.widget.FrameLayout
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.ComposeView
+import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.LifecycleRegistry
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.setViewTreeLifecycleOwner
+import androidx.lifecycle.setViewTreeViewModelStoreOwner
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
+import androidx.savedstate.setViewTreeSavedStateRegistryOwner
+import java.io.File
+import kotlin.math.min
+import kotlin.math.roundToInt
+
+object Overlay {
+    @Volatile
+    var rodando = false
+}
+
+// Dono de lifecycle falso: o Compose precisa disso para rodar dentro de um Service
+class Dono : LifecycleOwner, SavedStateRegistryOwner, ViewModelStoreOwner {
+    private val registro = LifecycleRegistry(this)
+    private val controle = SavedStateRegistryController.create(this)
+    override val lifecycle: Lifecycle get() = registro
+    override val savedStateRegistry: SavedStateRegistry get() = controle.savedStateRegistry
+    override val viewModelStore = ViewModelStore()
+
+    fun criar() {
+        controle.performAttach()
+        controle.performRestore(null)
+        registro.currentState = Lifecycle.State.RESUMED
+    }
+
+    fun destruir() {
+        registro.currentState = Lifecycle.State.DESTROYED
+        viewModelStore.clear()
+    }
+}
+
+// Raiz que só "espia" o toque (coordenadas da tela) para mover a janela sem tremer
+class Raiz(ctx: Context, private val aoToque: (MotionEvent) -> Unit) : FrameLayout(ctx) {
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        aoToque(ev)
+        return super.dispatchTouchEvent(ev)
+    }
+}
+
+class OverlayService : Service() {
+
+    companion object {
+        const val ACAO_PARAR = "parar"
+        const val CANAL = "synapse_a"
+    }
+
+    private val dono = Dono()
+    private lateinit var wm: WindowManager
+    private lateinit var estado: Estado
+    private var principal: Flutuante? = null
+    private var janelaArquivos: Flutuante? = null
+
+    private var d = 1f
+    private var escala = 1f
+    private var larguraTela = 0
+
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACAO_PARAR) stopSelf()
+        return START_NOT_STICKY
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        Overlay.rodando = true
+        dono.criar()
+        iniciarNotificacao()
+
+        wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val m = resources.displayMetrics
+        d = m.density
+        larguraTela = m.widthPixels
+        // Em tela estreita (retrato) a janela inteira é reduzida para caber
+        escala = min(1f, 0.96f * larguraTela / (560 * d))
+
+        val pasta = File(filesDir, "SynapseA").apply { mkdirs() }
+        estado = Estado(pasta)
+        estado.onToggleArquivos = { if (janelaArquivos != null) fecharArquivos() else abrirArquivos() }
+        estado.onFecharArquivos = { fecharArquivos() }
+
+        val w = (560 * d * escala).roundToInt()
+        val h = (245 * d * escala).roundToInt()
+        val arrasto = Arrasto()
+        try {
+            principal = Flutuante(w, h, (larguraTela - w) / 2, (24 * d).roundToInt(), arrasto) {
+                Escalado(escala) { Bloco(estado, arrasto) }
+            }
+        } catch (e: Exception) {
+            stopSelf()
+        }
+    }
+
+    private fun abrirArquivos() {
+        val p = principal ?: return
+        estado.arquivos = estado.pasta.list()?.sorted().orEmpty()
+        val fw = (150 * d * escala).roundToInt()
+        val fh = (230 * d * escala).roundToInt()
+        val gap = (8 * d * escala).roundToInt()
+        var x = p.posX + p.w + gap
+        var y = p.posY
+        if (x + fw > larguraTela) {
+            x = p.posX - fw - gap
+            if (x < 0) {
+                x = p.posX
+                y = p.posY + p.h + gap
+            }
+        }
+        val arrasto = Arrasto()
+        janelaArquivos = Flutuante(fw, fh, x, y, arrasto) {
+            Escalado(escala) { JanelaArquivos(estado, arrasto) }
+        }
+    }
+
+    private fun fecharArquivos() {
+        janelaArquivos?.remover()
+        janelaArquivos = null
+    }
+
+    private fun iniciarNotificacao() {
+        val nm = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= 26) {
+            nm.createNotificationChannel(
+                NotificationChannel(CANAL, "Synapse A", NotificationManager.IMPORTANCE_LOW)
+            )
+        }
+        val parar = PendingIntent.getService(
+            this, 0,
+            Intent(this, OverlayService::class.java).setAction(ACAO_PARAR),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val notif: Notification = NotificationCompat.Builder(this, CANAL)
+            .setSmallIcon(android.R.drawable.ic_menu_edit)
+            .setContentTitle("Synapse A")
+            .setContentText("Janela flutuante ativa")
+            .setOngoing(true)
+            .addAction(0, "Fechar", parar)
+            .build()
+        ServiceCompat.startForeground(this, 1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MANIFEST)
+    }
+
+    override fun onDestroy() {
+        janelaArquivos?.remover()
+        principal?.remover()
+        dono.destruir()
+        Overlay.rodando = false
+        super.onDestroy()
+    }
+
+    // Uma janela flutuante (WindowManager) com Compose dentro
+    private inner class Flutuante(
+        val w: Int, val h: Int, x: Int, y: Int,
+        private val arrasto: Arrasto,
+        conteudo: @Composable () -> Unit
+    ) {
+        private var fx = x.toFloat()
+        private var fy = y.toFloat()
+        private var ux = 0f
+        private var uy = 0f
+        private lateinit var raiz: Raiz
+
+        val params = WindowManager.LayoutParams(
+            w, h,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            this.x = x
+            this.y = y
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_NOTHING
+        }
+
+        val posX: Int get() = params.x
+        val posY: Int get() = params.y
+
+        init {
+            raiz = Raiz(this@OverlayService) { ev ->
+                when (ev.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        ux = ev.rawX
+                        uy = ev.rawY
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (arrasto.ativo) {
+                            fx += ev.rawX - ux
+                            fy += ev.rawY - uy
+                            params.x = fx.roundToInt()
+                            params.y = fy.roundToInt()
+                            wm.updateViewLayout(raiz, params)
+                        }
+                        ux = ev.rawX
+                        uy = ev.rawY
+                    }
+                }
+            }
+            val cv = ComposeView(this@OverlayService).apply { setContent(conteudo) }
+            listOf<View>(raiz, cv).forEach {
+                it.setViewTreeLifecycleOwner(dono)
+                it.setViewTreeSavedStateRegistryOwner(dono)
+                it.setViewTreeViewModelStoreOwner(dono)
+            }
+            raiz.addView(cv)
+            wm.addView(raiz, params)
+        }
+
+        fun remover() {
+            runCatching { wm.removeView(raiz) }
+        }
+    }
+}
+
+##### FILE: app/src/main/java/com/example/synapsea/Ui.kt
+package com.example.synapsea
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.sizeIn
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import org.luaj.vm2.LuaError
+import org.luaj.vm2.lib.jse.JsePlatform
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.PrintStream
+
+// ===== Cores (iguais ao script Lua) =====
+private val C12 = Color(0xFF0C0C0C)
+private val C20 = Color(0xFF141414)
+private val C25 = Color(0xFF191919)
+private val C38 = Color(0xFF262626)
+private val C40 = Color(0xFF282828)
+private val C52 = Color(0xFF343434)
+private val C70 = Color(0xFF464646)
+
+private const val CONSOLE_COD =
+    "game:GetService(\"StarterGui\"):SetCore(\"DevConsoleVisible\", true)"
+
+class Aba(val nome: String, texto: String = "") {
+    var texto by mutableStateOf(texto)
+}
+
+// Avisa o serviço que o usuário está arrastando a janela
+class Arrasto {
+    @Volatile
+    var ativo = false
+}
+
+class Estado(val pasta: File) {
+    val abas = mutableStateListOf(Aba("Script 1"))
+    var ativa by mutableIntStateOf(0)
+    private var contador = 1
+    var anexado by mutableStateOf(false)
+    var erro by mutableStateOf<String?>(null)
+    var textoSave by mutableStateOf("Save File")
+    val log = mutableStateListOf<String>()
+    var arquivos by mutableStateOf(listOf<String>())
+
+    var onToggleArquivos: () -> Unit = {}
+    var onFecharArquivos: () -> Unit = {}
+
+    fun mostrarErro(m: String) {
+        erro = if (m.length > 110) m.take(107) + "..." else m
+    }
+
+    fun novaAba(texto: String = "", nome: String? = null) {
+        contador++
+        abas.add(Aba(nome ?: "Script $contador", texto))
+        ativa = abas.lastIndex
+    }
+
+    fun fecharAba(i: Int) {
+        if (abas.size == 1) {
+            abas[0].texto = ""
+            return
+        }
+        abas.removeAt(i)
+        if (i < ativa) ativa-- else if (i == ativa) ativa = minOf(i, abas.lastIndex)
+    }
+
+    fun exige(acao: () -> Unit): () -> Unit = {
+        if (!anexado) mostrarErro("Clique em Attach primeiro para usar esta função.") else acao()
+    }
+
+    fun executar(codigo: String) {
+        if (codigo.isEmpty()) return
+        val g = JsePlatform.standardGlobals()
+        val saida = ByteArrayOutputStream()
+        g.STDOUT = PrintStream(saida, true)
+        val fn = try {
+            g.load(codigo, "script")
+        } catch (e: LuaError) {
+            mostrarErro("Erro de sintaxe: ${e.message}")
+            return
+        }
+        Thread {
+            var falha: String? = null
+            try {
+                fn.call()
+            } catch (e: Throwable) {
+                falha = "[Synapse A] erro: ${e.message}"
+            }
+            saida.toString().trimEnd().lines().filter { it.isNotEmpty() }.forEach { log.add(it) }
+            falha?.let { log.add(it) }
+            while (log.size > 50) log.removeAt(0)
+        }.start()
+    }
+
+    fun salvarAtiva(): Boolean {
+        val a = abas[ativa]
+        var nome = a.nome.replace(Regex("[^\\w\\- .]"), "_")
+        val baixo = nome.lowercase()
+        if (!baixo.endsWith(".lua") && !baixo.endsWith(".txt")) nome += ".lua"
+        return runCatching { File(pasta, nome).writeText(a.texto) }.isSuccess
+    }
+
+    fun abrirArquivo(nome: String) {
+        val conteudo = runCatching { File(pasta, nome).readText() }.getOrNull()
+        if (conteudo != null) novaAba(conteudo, nome)
+    }
+}
+
+private fun Modifier.vGrad(a: Color, b: Color) =
+    background(Brush.verticalGradient(listOf(a, b)))
+
+private fun Modifier.borda() = border(1.dp, C70)
+
+private fun Modifier.arrastar(a: Arrasto) =
+    pointerInput(Unit) {
+        detectDragGestures(
+            onDragStart = { a.ativo = true },
+            onDragEnd = { a.ativo = false },
+            onDragCancel = { a.ativo = false }
+        ) { change, _ -> change.consume() }
+    }
+
+// Escala toda a UI (dp e sp) para caber em telas estreitas
+@Composable
+fun Escalado(escala: Float, conteudo: @Composable () -> Unit) {
+    val base = LocalDensity.current
+    CompositionLocalProvider(
+        LocalDensity provides Density(base.density * escala, base.fontScale),
+        content = conteudo
+    )
+}
+
+@Composable
+fun Bloco(est: Estado, arrasto: Arrasto) {
+    val scope = rememberCoroutineScope()
+    val clip = LocalClipboardManager.current
+    val ativa = est.ativa
+
+    Box(Modifier.size(560.dp, 245.dp).background(C40).arrastar(arrasto)) {
+        // Top bar + linha + título + logo
+        Box(Modifier.size(560.dp, 32.dp).vGrad(C40, C12))
+        Box(Modifier.offset(y = 32.dp).size(560.dp, 1.dp).background(C70))
+        Box(Modifier.size(560.dp, 32.dp), Alignment.Center) {
+            Text("synapse A - 1.0.0", color = Color.White, fontSize = 14.sp)
+        }
+        Box(Modifier.offset(6.dp, 3.dp).size(26.dp), Alignment.Center) {
+            Text(
+                "S", color = Color.White, fontSize = 22.sp,
+                fontWeight = FontWeight.Bold, fontStyle = FontStyle.Italic
+            )
+        }
+
+        // Abas
+        Row(
+            Modifier
+                .offset(10.dp, 38.dp)
+                .size(390.dp, 20.dp)
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(1.dp)
+        ) {
+            est.abas.forEachIndexed { i, a ->
+                val on = i == ativa
+                Row(
+                    Modifier
+                        .fillMaxHeight()
+                        .background(if (on) Color(0xFF1E1E1E) else Color(0xFF101010))
+                        .padding(start = 5.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        a.nome, fontSize = 13.sp, maxLines = 1,
+                        color = if (on) Color.White else Color(0xFF969696),
+                        modifier = Modifier.clickable { est.ativa = i }
+                    )
+                    Spacer(Modifier.width(3.dp))
+                    Text(
+                        "×", fontSize = 15.sp, color = Color(0xFFAAAAAA),
+                        modifier = Modifier.clickable { est.fecharAba(i) }
+                    )
+                }
+            }
+            Box(
+                Modifier
+                    .fillMaxHeight()
+                    .width(20.dp)
+                    .background(Color(0xFF101010))
+                    .clickable { est.novaAba() },
+                Alignment.Center
+            ) { Text("+", fontSize = 16.sp, color = Color(0xFFC8C8C8)) }
+        }
+
+        // Editor com realce de sintaxe
+        key(est.abas[ativa]) {
+            Editor(est.abas[ativa], Modifier.offset(10.dp, 60.dp).size(390.dp, 140.dp))
+        }
+
+        // Caixa lateral: console >
+        Box(Modifier.offset(412.dp, 38.dp).size(138.dp, 162.dp).vGrad(C25, C38).borda()) {
+            Row(
+                Modifier
+                    .offset(6.dp, 4.dp)
+                    .height(20.dp)
+                    .clickable { est.novaAba(CONSOLE_COD, "console") },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("console", color = Color.White, fontSize = 14.sp)
+                Spacer(Modifier.width(8.dp))
+                Text("›", color = Color(0xFF828282), fontSize = 18.sp)
+            }
+            Box(
+                Modifier
+                    .offset(6.dp, 28.dp)
+                    .size(126.dp, 130.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    est.log.joinToString("\n"), color = Color(0xFF9A9A9A),
+                    fontSize = 9.sp, fontFamily = FontFamily.Monospace
+                )
+            }
+        }
+
+        // Botões
+        Botao("Execute", 4, 68, est.exige { est.executar(est.abas[est.ativa].texto) })
+        Botao("Clear", 76, 68) { est.abas[est.ativa].texto = "" }
+        Botao("Execute Clip", 148, 92, est.exige {
+            val t = clip.getText()?.text.orEmpty()
+            if (t.isNotEmpty()) est.executar(t)
+        })
+        Botao("Open File", 244, 68, est.exige { est.onToggleArquivos() })
+        Botao(est.textoSave, 316, 68, est.exige {
+            est.textoSave = if (est.salvarAtiva()) "Saved!" else "Error"
+            scope.launch {
+                delay(1000)
+                est.textoSave = "Save File"
+            }
+        })
+        Botao(if (est.anexado) "Attached" else "Attach", 482, 68) {
+            if (!est.anexado) {
+                est.anexado = true
+                est.erro = null
+            }
+        }
+
+        // Popup de erro
+        est.erro?.let { msg ->
+            Popup(msg, { est.erro = null }, Modifier.align(Alignment.Center))
+        }
+    }
+}
+
+@Composable
+fun Editor(aba: Aba, modifier: Modifier) {
+    Box(modifier.vGrad(C25, C38).borda()) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val w = maxWidth
+            val h = maxHeight
+            Box(
+                Modifier
+                    .verticalScroll(rememberScrollState())
+                    .horizontalScroll(rememberScrollState())
+            ) {
+                BasicTextField(
+                    value = aba.texto,
+                    onValueChange = { if (it.length <= 200000) aba.texto = it },
+                    modifier = Modifier
+                        .sizeIn(minWidth = w, minHeight = h)
+                        .padding(horizontal = 6.dp, vertical = 4.dp),
+                    textStyle = TextStyle(
+                        color = Color.White,
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    cursorBrush = SolidColor(Color.White),
+                    softWrap = false,
+                    visualTransformation = RealceTransform
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun Botao(texto: String, x: Int, largura: Int, onClick: () -> Unit) {
+    val src = remember { MutableInteractionSource() }
+    val press by src.collectIsPressedAsState()
+    Box(
+        Modifier
+            .offset(x.dp, 212.dp)
+            .size(largura.dp, 24.dp)
+            .vGrad(if (press) C38 else C52, if (press) C12 else C20)
+            .clickable(interactionSource = src, indication = null, onClick = onClick),
+        Alignment.Center
+    ) {
+        Text(texto, color = Color.White, fontSize = 14.sp, maxLines = 1)
+    }
+}
+
+@Composable
+fun Popup(msg: String, onFechar: () -> Unit, modifier: Modifier) {
+    Box(modifier.size(250.dp, 92.dp).vGrad(C25, C38).borda()) {
+        Box(Modifier.fillMaxWidth().height(24.dp).vGrad(C40, C12)) {
+            Text(
+                "Synapse A", color = Color.White, fontSize = 13.sp,
+                modifier = Modifier.align(Alignment.Center)
+            )
+            Text(
+                "×", color = Color(0xFFC8C8C8), fontSize = 20.sp, textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .width(24.dp)
+                    .clickable { onFechar() }
+            )
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).offset(y = 24.dp).background(C70))
+        Text(
+            msg, color = Color.White, fontSize = 14.sp, textAlign = TextAlign.Center,
+            modifier = Modifier
+                .align(Alignment.Center)
+                .padding(top = 24.dp, start = 10.dp, end = 10.dp)
+        )
+    }
+}
+
+@Composable
+fun JanelaArquivos(est: Estado, arrasto: Arrasto) {
+    Box(Modifier.size(150.dp, 230.dp).background(C40)) {
+        Box(Modifier.fillMaxWidth().height(26.dp).vGrad(C40, C12).arrastar(arrasto)) {
+            Text(
+                "Open File", color = Color.White, fontSize = 13.sp,
+                modifier = Modifier.align(Alignment.Center)
+            )
+            Text(
+                "×", color = Color(0xFFC8C8C8), fontSize = 20.sp, textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .width(26.dp)
+                    .clickable { est.onFecharArquivos() }
+            )
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).offset(y = 26.dp).background(C70))
+        Box(Modifier.offset(6.dp, 32.dp).size(138.dp, 192.dp).vGrad(C25, C38).borda()) {
+            Column(
+                Modifier
+                    .verticalScroll(rememberScrollState())
+                    .padding(start = 6.dp, top = 4.dp)
+            ) {
+                if (est.arquivos.isEmpty()) {
+                    Text("(sem arquivos)", color = Color(0xFF787878), fontSize = 13.sp)
+                } else {
+                    est.arquivos.forEach { nome ->
+                        Text(
+                            nome, color = Color.White, fontSize = 13.sp, maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(20.dp)
+                                .clickable { est.abrirArquivo(nome) }
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
