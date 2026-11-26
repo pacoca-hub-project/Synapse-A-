@@ -44,8 +44,8 @@ android {
         applicationId = "com.example.synapsea"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.1.0"
     }
 
     buildFeatures {
@@ -76,6 +76,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel:2.8.6")
     implementation("androidx.savedstate:savedstate-ktx:1.2.1")
     implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.animation:animation")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
     implementation("org.luaj:luaj-jse:3.0.1")
@@ -93,7 +94,7 @@ dependencies {
     <application
         android:allowBackup="true"
         android:label="Synapse A"
-        android:theme="@android:style/Theme.Translucent.NoTitleBar">
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
         <activity
             android:name=".MainActivity"
@@ -261,14 +262,19 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.Process
 import android.provider.Settings
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
 import androidx.core.content.ContextCompat
 
-// Activity sem tela: pede as permissões, liga o serviço da janela flutuante e fecha.
-// Se a janela já estiver ativa, abrir o app de novo FECHA a janela.
+// Tela inicial: Rodar (liga a janela flutuante), alternar (mostra/oculta) e fechar tudo.
 class MainActivity : ComponentActivity() {
 
     private val pedirOverlay =
@@ -279,13 +285,19 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
-        if (Overlay.rodando) {
-            stopService(Intent(this, OverlayService::class.java))
-            finish()
-            return
+        setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                Inicio(
+                    aoRodar = { rodar() },
+                    aoAlternar = { alternar() },
+                    aoFecharTudo = { fecharTudo() }
+                )
+            }
         }
+    }
 
+    private fun rodar() {
+        if (Overlay.rodando) return
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
             != PackageManager.PERMISSION_GRANTED
@@ -309,11 +321,24 @@ class MainActivity : ComponentActivity() {
 
     private fun iniciar() {
         if (Settings.canDrawOverlays(this)) {
-            ContextCompat.startForegroundService(this, Intent(this, OverlayService::class.java))
+            if (!Overlay.rodando) {
+                ContextCompat.startForegroundService(this, Intent(this, OverlayService::class.java))
+            }
         } else {
             Toast.makeText(this, "Permissão necessária para flutuar na tela", Toast.LENGTH_LONG).show()
         }
-        finish()
+    }
+
+    private fun alternar() {
+        if (!Overlay.rodando) return
+        startService(Intent(this, OverlayService::class.java).setAction(OverlayService.ACAO_ALTERNAR))
+    }
+
+    private fun fecharTudo() {
+        stopService(Intent(this, OverlayService::class.java))
+        finishAndRemoveTask()
+        // Garante que o processo todo termina, sem sobrar nada em segundo plano
+        Handler(Looper.getMainLooper()).postDelayed({ Process.killProcess(Process.myPid()) }, 300)
     }
 }
 
@@ -337,6 +362,9 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.ComposeView
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -355,9 +383,10 @@ import java.io.File
 import kotlin.math.min
 import kotlin.math.roundToInt
 
+// Estado observável: a tela inicial do app reage a ele
 object Overlay {
-    @Volatile
-    var rodando = false
+    var rodando by mutableStateOf(false)
+    var oculto by mutableStateOf(false)
 }
 
 // Dono de lifecycle falso: o Compose precisa disso para rodar dentro de um Service
@@ -392,6 +421,7 @@ class OverlayService : Service() {
 
     companion object {
         const val ACAO_PARAR = "parar"
+        const val ACAO_ALTERNAR = "alternar"
         const val CANAL = "synapse_a"
     }
 
@@ -408,13 +438,17 @@ class OverlayService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACAO_PARAR) stopSelf()
+        when (intent?.action) {
+            ACAO_PARAR -> stopSelf()
+            ACAO_ALTERNAR -> alternar()
+        }
         return START_NOT_STICKY
     }
 
     override fun onCreate() {
         super.onCreate()
         Overlay.rodando = true
+        Overlay.oculto = false
         dono.criar()
         iniciarNotificacao()
 
@@ -463,6 +497,14 @@ class OverlayService : Service() {
         }
     }
 
+    // Mostra/oculta as janelas sem encerrar o serviço
+    private fun alternar() {
+        Overlay.oculto = !Overlay.oculto
+        val ver = !Overlay.oculto
+        principal?.visivel(ver)
+        janelaArquivos?.visivel(ver)
+    }
+
     private fun fecharArquivos() {
         janelaArquivos?.remover()
         janelaArquivos = null
@@ -495,6 +537,7 @@ class OverlayService : Service() {
         principal?.remover()
         dono.destruir()
         Overlay.rodando = false
+        Overlay.oculto = false
         super.onDestroy()
     }
 
@@ -553,6 +596,10 @@ class OverlayService : Service() {
             }
             raiz.addView(cv)
             wm.addView(raiz, params)
+        }
+
+        fun visivel(v: Boolean) {
+            raiz.visibility = if (v) View.VISIBLE else View.GONE
         }
 
         fun remover() {
@@ -975,5 +1022,266 @@ fun JanelaArquivos(est: Estado, arrasto: Arrasto) {
                 }
             }
         }
+    }
+}
+
+##### FILE: app/src/main/java/com/example/synapsea/Icone.kt
+package com.example.synapsea
+
+import android.graphics.BitmapFactory
+import android.util.Base64
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+
+// Ícone do Synapse A (PNG 96x96) embutido em base64
+private const val ICONE_B64 = "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"
+
+val iconeBitmap: ImageBitmap? by lazy {
+    runCatching {
+        val bytes = Base64.decode(ICONE_B64, Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size).asImageBitmap()
+    }.getOrNull()
+}
+
+##### FILE: app/src/main/java/com/example/synapsea/Inicio.kt
+package com.example.synapsea
+
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.rotate
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+
+// Cores tiradas do ícone
+private val Fundo = Color(0xFF0E0E13)
+private val Cartao = Color(0xFF181821)
+private val Vermelho = Color(0xFFC83850)
+private val Roxo = Color(0xFF6A2C90)
+private val Azul = Color(0xFF3A7FC0)
+private val Verde = Color(0xFF62B034)
+private val Laranja = Color(0xFFD0701C)
+private val Turquesa = Color(0xFF3A8AA8)
+
+@Composable
+fun Inicio(aoRodar: () -> Unit, aoAlternar: () -> Unit, aoFecharTudo: () -> Unit) {
+    val rodando = Overlay.rodando
+    val visivel = !Overlay.oculto
+
+    Box(Modifier.fillMaxSize().background(Fundo)) {
+        Papeis()
+
+        Column(
+            Modifier
+                .fillMaxSize()
+                .systemBarsPadding()
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 24.dp, vertical = 20.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Spacer(Modifier.height(24.dp))
+
+            // Ícone
+            Box(
+                Modifier
+                    .size(132.dp)
+                    .clip(RoundedCornerShape(32.dp))
+                    .background(Color(0xFF1B1B26))
+                    .border(1.dp, Color(0x33FFFFFF), RoundedCornerShape(32.dp)),
+                Alignment.Center
+            ) {
+                val ic = iconeBitmap
+                if (ic != null) {
+                    Image(ic, "Synapse A", Modifier.size(104.dp))
+                } else {
+                    Text("S", color = Color.White, fontSize = 64.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+
+            Spacer(Modifier.height(22.dp))
+            Text("Synapse A", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Editor flutuante de scripts Lua",
+                color = Color(0xFFB4B4C4), fontSize = 15.sp, textAlign = TextAlign.Center
+            )
+
+            Spacer(Modifier.height(24.dp))
+
+            // Sobre
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Cartao)
+                    .border(1.dp, Color(0x22FFFFFF), RoundedCornerShape(20.dp))
+                    .padding(18.dp)
+            ) {
+                Text("Sobre", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Uma janela de editor que flutua sobre qualquer app: abas, realce de sintaxe, " +
+                        "console e arquivos salvos. Toque em Rodar para abrir a janela.",
+                    color = Color(0xFFB4B4C4), fontSize = 14.sp, lineHeight = 20.sp
+                )
+                Spacer(Modifier.height(14.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(Vermelho, Laranja, Verde, Turquesa, Azul, Roxo).forEach {
+                        Box(Modifier.size(10.dp).clip(CircleShape).background(it))
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            // Estado
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier.size(10.dp).clip(CircleShape)
+                        .background(if (rodando) Verde else Color(0xFF6A6A78))
+                )
+                Spacer(Modifier.size(8.dp))
+                Text(
+                    if (rodando) "Janela ativa" else "Janela desligada",
+                    color = Color(0xFFD8D8E4), fontSize = 14.sp
+                )
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            // Rodar
+            val grad = Brush.horizontalGradient(listOf(Vermelho, Roxo, Azul))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .clip(RoundedCornerShape(28.dp))
+                    .background(if (rodando) Brush.horizontalGradient(listOf(Color(0xFF2A2A36), Color(0xFF2A2A36))) else grad)
+                    .clickable(enabled = !rodando) { aoRodar() },
+                Alignment.Center
+            ) {
+                Text(
+                    if (rodando) "Rodando" else "Rodar",
+                    color = if (rodando) Color(0xFF9A9AAA) else Color.White,
+                    fontSize = 18.sp, fontWeight = FontWeight.Bold
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            // Toggle: mostrar / ocultar a janela
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(Cartao)
+                    .border(1.dp, Color(0x22FFFFFF), RoundedCornerShape(18.dp))
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("Mostrar janela", color = Color.White, fontSize = 15.sp)
+                    Text(
+                        "Oculta sem encerrar", color = Color(0xFF8E8EA0), fontSize = 12.sp
+                    )
+                }
+                Switch(
+                    checked = rodando && visivel,
+                    onCheckedChange = { aoAlternar() },
+                    enabled = rodando,
+                    colors = SwitchDefaults.colors(
+                        checkedTrackColor = Verde,
+                        checkedThumbColor = Color.White
+                    )
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            // Fechar completamente
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(52.dp)
+                    .clip(RoundedCornerShape(26.dp))
+                    .border(1.5.dp, Vermelho, RoundedCornerShape(26.dp))
+                    .clickable { aoFecharTudo() },
+                Alignment.Center
+            ) {
+                Text("Fechar completamente", color = Color(0xFFFF7088), fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            }
+
+            Spacer(Modifier.height(24.dp))
+            Text("v1.1.0 · versão de teste", color = Color(0xFF6A6A7A), fontSize = 12.sp)
+        }
+    }
+}
+
+// Papéis coloridos ao fundo, no estilo do ícone, balançando devagar
+@Composable
+private fun Papeis() {
+    val t = rememberInfiniteTransition(label = "papeis")
+    val fase by t.animateFloat(
+        initialValue = -1f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(7000, easing = LinearEasing), RepeatMode.Reverse),
+        label = "fase"
+    )
+    Canvas(Modifier.fillMaxSize()) {
+        fun papel(cor: Color, cx: Float, cy: Float, w: Float, h: Float, ang: Float) {
+            val c = Offset(cx * size.width, cy * size.height)
+            rotate(ang + fase * 6f, c) {
+                drawRoundRect(
+                    color = cor.copy(alpha = 0.22f),
+                    topLeft = Offset(c.x - w / 2, c.y - h / 2),
+                    size = Size(w, h),
+                    cornerRadius = CornerRadius(18.dp.toPx(), 18.dp.toPx())
+                )
+            }
+        }
+        val u = 1.dp.toPx()
+        papel(Verde, 0.12f, 0.06f, 150 * u, 190 * u, -14f)
+        papel(Laranja, 0.92f, 0.10f, 130 * u, 170 * u, 16f)
+        papel(Vermelho, 0.02f, 0.58f, 140 * u, 180 * u, 10f)
+        papel(Roxo, 0.98f, 0.62f, 150 * u, 190 * u, -12f)
+        papel(Turquesa, 0.30f, 0.98f, 170 * u, 150 * u, 18f)
+        papel(Azul, 0.82f, 0.96f, 150 * u, 150 * u, -18f)
     }
 }
