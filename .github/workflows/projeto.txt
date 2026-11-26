@@ -30,6 +30,8 @@ android.nonTransitiveRClass=true
 kotlin.code.style=official
 
 ##### FILE: app/build.gradle.kts
+import java.util.Base64
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -44,7 +46,7 @@ val gerarIcone by tasks.registering {
     doLast {
         val dir = saida.get().asFile.resolve("mipmap-xxxhdpi")
         dir.mkdirs()
-        dir.resolve("ic_launcher.png").writeBytes(java.util.Base64.getDecoder().decode(iconeB64))
+        dir.resolve("ic_launcher.png").writeBytes(Base64.getDecoder().decode(iconeB64))
     }
 }
 tasks.named("preBuild") { dependsOn(gerarIcone) }
