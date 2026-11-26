@@ -544,6 +544,7 @@ class OverlayService : Service() {
     private var principal: Flutuante? = null
     private var janelaArquivos: Flutuante? = null
     private var janelaOutput: Flutuante? = null
+    private var tutorial: Flutuante? = null
     private val janelasUi = mutableListOf<Flutuante>()
 
     private var d = 1f
@@ -661,6 +662,20 @@ class OverlayService : Service() {
     private fun anexar() {
         if (!temAcessoDeUso()) {
             estado.mostrarErro("Ative \"Acesso de uso\" para o Synapse A e toque em Attach de novo.")
+            if (tutorial == null || tutorial !in janelasUi) {
+                tutorial = abrirUi(
+                    "Como liberar a permissão",
+                    "Se o botão estiver cinza ou aparecer \"Acesso negado ao app\":\n\n" +
+                        "1. Segure o ícone do Synapse A e abra \"Informações do app\".\n" +
+                        "2. Toque nos 3 pontinhos (canto superior direito).\n" +
+                        "3. Toque em \"Permitir configurações restritas\" e confirme.\n" +
+                        "4. Volte em \"Dados de uso do app\" e ative a permissão.\n" +
+                        "5. Toque em Attach de novo.\n\n" +
+                        "Essa é a restrição comum do Android 13+ para apps instalados fora da Play Store. " +
+                        "Não é um erro do app.",
+                    290, 230
+                )
+            }
             startActivity(
                 Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             )
@@ -702,10 +717,10 @@ class OverlayService : Service() {
     }
 
     // Janela flutuante extra criada pelo Lua com ui("título", "texto")
-    private fun abrirUi(titulo: String, texto: String) {
-        val p = principal ?: return
-        val fw = (220 * d * escala).roundToInt()
-        val fh = (150 * d * escala).roundToInt()
+    private fun abrirUi(titulo: String, texto: String, larg: Int = 220, alt: Int = 150): Flutuante? {
+        val p = principal ?: return null
+        val fw = (larg * d * escala).roundToInt()
+        val fh = (alt * d * escala).roundToInt()
         val desloc = (16 * d * escala * (janelasUi.size % 5)).roundToInt()
         val x = (p.posX + desloc).coerceIn(0, maxOf(0, larguraTela - fw))
         val y = p.posY + p.h + (8 * d * escala).roundToInt() + desloc
@@ -713,7 +728,7 @@ class OverlayService : Service() {
         lateinit var janela: Flutuante
         janela = Flutuante(fw, fh, x, y, arrasto) {
             Escalado(escala) {
-                JanelaUi(titulo, texto, arrasto) {
+                JanelaUi(titulo, texto, arrasto, larg, alt) {
                     janelasUi.remove(janela)
                     janela.remover()
                 }
@@ -721,6 +736,7 @@ class OverlayService : Service() {
         }
         janela.visivel(!Overlay.oculto)
         janelasUi.add(janela)
+        return janela
     }
 
     private fun fecharArquivos() {
@@ -934,7 +950,14 @@ private const val CONSOLE_COD =
     "game:GetService(\"StarterGui\"):SetCore(\"DevConsoleVisible\", true)"
 
 class Aba(val nome: String, texto: String = "") {
-    var texto by mutableStateOf(texto)
+    private var _texto by mutableStateOf(texto)
+    var aoMudar: () -> Unit = {}
+    var texto: String
+        get() = _texto
+        set(v) {
+            _texto = v
+            aoMudar()
+        }
 }
 
 // Avisa o serviço que o usuário está arrastando a janela
@@ -947,9 +970,46 @@ class Arrasto {
 }
 
 class Estado(val pasta: File) {
-    val abas = mutableStateListOf(Aba("Script 1"))
+    val abas = mutableStateListOf<Aba>()
     var ativa by mutableIntStateOf(0)
     private var contador = 1
+    private val arqAbas = File(pasta.parentFile, "abas.json")
+    private val handlerSave = Handler(Looper.getMainLooper())
+    private val tarefaSave = Runnable { gravarAbas() }
+
+    init {
+        runCatching {
+            if (arqAbas.exists()) {
+                val o = org.json.JSONObject(arqAbas.readText())
+                val arr = o.getJSONArray("abas")
+                for (i in 0 until arr.length()) {
+                    val it = arr.getJSONObject(i)
+                    abas.add(Aba(it.getString("nome"), it.getString("texto")))
+                }
+                contador = o.optInt("contador", abas.size)
+                ativa = o.optInt("ativa", 0).coerceIn(0, maxOf(0, abas.lastIndex))
+            }
+        }
+        if (abas.isEmpty()) abas.add(Aba("Script 1"))
+        abas.forEach { it.aoMudar = { agendarSave() } }
+    }
+
+    fun agendarSave() {
+        handlerSave.removeCallbacks(tarefaSave)
+        handlerSave.postDelayed(tarefaSave, 500)
+    }
+
+    fun gravarAbas() {
+        runCatching {
+            val arr = org.json.JSONArray()
+            abas.forEach {
+                arr.put(org.json.JSONObject().put("nome", it.nome).put("texto", it.texto))
+            }
+            val o = org.json.JSONObject()
+                .put("abas", arr).put("ativa", ativa).put("contador", contador)
+            arqAbas.writeText(o.toString())
+        }
+    }
     var anexado by mutableStateOf(false)
     var erro by mutableStateOf<String?>(null)
     var textoSave by mutableStateOf("Save File")
@@ -970,8 +1030,9 @@ class Estado(val pasta: File) {
 
     fun novaAba(texto: String = "", nome: String? = null) {
         contador++
-        abas.add(Aba(nome ?: "Script $contador", texto))
+        abas.add(Aba(nome ?: "Script $contador", texto).also { it.aoMudar = { agendarSave() } })
         ativa = abas.lastIndex
+        agendarSave()
     }
 
     fun fecharAba(i: Int) {
@@ -981,6 +1042,7 @@ class Estado(val pasta: File) {
         }
         abas.removeAt(i)
         if (i < ativa) ativa-- else if (i == ativa) ativa = minOf(i, abas.lastIndex)
+        agendarSave()
     }
 
     fun exige(acao: () -> Unit): () -> Unit = {
@@ -1104,7 +1166,7 @@ fun Bloco(est: Estado, arrasto: Arrasto) {
                     Text(
                         a.nome, fontSize = 13.sp, maxLines = 1,
                         color = if (on) Color.White else Color(0xFF969696),
-                        modifier = Modifier.clickable { est.ativa = i }
+                        modifier = Modifier.clickable { est.ativa = i; est.agendarSave() }
                     )
                     Spacer(Modifier.width(3.dp))
                     Text(
@@ -1140,17 +1202,6 @@ fun Bloco(est: Estado, arrasto: Arrasto) {
                 Text("console", color = Color.White, fontSize = 14.sp)
                 Spacer(Modifier.width(8.dp))
                 Text("›", color = Color(0xFF828282), fontSize = 18.sp)
-            }
-            Box(
-                Modifier
-                    .offset(6.dp, 28.dp)
-                    .size(126.dp, 130.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                Text(
-                    est.log.joinToString("\n"), color = Color(0xFF9A9A9A),
-                    fontSize = 9.sp, fontFamily = FontFamily.Monospace
-                )
             }
         }
 
@@ -1312,8 +1363,8 @@ fun JanelaArquivos(est: Estado, arrasto: Arrasto) {
 }
 
 @Composable
-fun JanelaUi(titulo: String, texto: String, arrasto: Arrasto, onFechar: () -> Unit) {
-    Box(Modifier.size(220.dp, 150.dp).background(C40)) {
+fun JanelaUi(titulo: String, texto: String, arrasto: Arrasto, larg: Int = 220, alt: Int = 150, onFechar: () -> Unit) {
+    Box(Modifier.size(larg.dp, alt.dp).background(C40)) {
         Box(Modifier.fillMaxWidth().height(26.dp).vGrad(C40, C12).arrastar(arrasto)) {
             Text(
                 titulo, color = Color.White, fontSize = 13.sp, maxLines = 1,
@@ -1329,7 +1380,7 @@ fun JanelaUi(titulo: String, texto: String, arrasto: Arrasto, onFechar: () -> Un
             )
         }
         Box(Modifier.fillMaxWidth().height(1.dp).offset(y = 26.dp).background(C70))
-        Box(Modifier.offset(6.dp, 32.dp).size(208.dp, 112.dp).vGrad(C25, C38).borda()) {
+        Box(Modifier.offset(6.dp, 32.dp).size((larg - 12).dp, (alt - 38).dp).vGrad(C25, C38).borda()) {
             Text(
                 texto, color = Color.White, fontSize = 13.sp,
                 modifier = Modifier.verticalScroll(rememberScrollState()).padding(6.dp)
