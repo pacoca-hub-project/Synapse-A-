@@ -1,0 +1,42 @@
+name: Build APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Separar projeto.txt em arquivos
+        run: |
+          python3 - <<'EOF'
+          import re, pathlib
+          texto = pathlib.Path("projeto.txt").read_text(encoding="utf-8")
+          partes = re.split(r"^##### FILE: (.+?)\s*$", texto, flags=re.M)
+          for i in range(1, len(partes), 2):
+              caminho = pathlib.Path("gerado") / partes[i].strip()
+              caminho.parent.mkdir(parents=True, exist_ok=True)
+              caminho.write_text(partes[i + 1].strip("\n") + "\n", encoding="utf-8")
+              print("criado:", caminho)
+          EOF
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build debug APK
+        working-directory: gerado
+        run: gradle assembleDebug
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SynapseA-apk
+          path: gerado/app/build/outputs/apk/debug/app-debug.apk
