@@ -14,8 +14,15 @@ jobs:
         run: |
           python3 - <<'EOF'
           import re, pathlib
-          texto = pathlib.Path("projeto.txt").read_text(encoding="utf-8")
+          achados = list(pathlib.Path(".").rglob("projeto.txt"))
+          if not achados:
+              raise SystemExit("ERRO: projeto.txt nao encontrado no repositorio")
+          origem = achados[0]
+          print("usando:", origem)
+          texto = origem.read_text(encoding="utf-8")
           partes = re.split(r"^##### FILE: (.+?)\s*$", texto, flags=re.M)
+          if len(partes) < 3:
+              raise SystemExit("ERRO: nenhuma linha '##### FILE:' encontrada")
           for i in range(1, len(partes), 2):
               caminho = pathlib.Path("gerado") / partes[i].strip()
               caminho.parent.mkdir(parents=True, exist_ok=True)
