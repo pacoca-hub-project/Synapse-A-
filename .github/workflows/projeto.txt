@@ -102,12 +102,16 @@ dependencies {
 
 ##### FILE: app/src/main/AndroidManifest.xml
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
 
     <application
         android:allowBackup="true"
@@ -449,17 +453,22 @@ class MainActivity : ComponentActivity() {
 ##### FILE: app/src/main/java/com/example/synapsea/OverlayService.kt
 package com.example.synapsea
 
+import android.app.AppOpsManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.graphics.PixelFormat
 import android.os.Build
 import android.os.IBinder
+import android.os.Process
+import android.provider.Settings
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -534,10 +543,13 @@ class OverlayService : Service() {
     private lateinit var estado: Estado
     private var principal: Flutuante? = null
     private var janelaArquivos: Flutuante? = null
+    private var janelaOutput: Flutuante? = null
+    private val janelasUi = mutableListOf<Flutuante>()
 
     private var d = 1f
     private var escala = 1f
     private var larguraTela = 0
+    private var alturaTela = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -560,6 +572,7 @@ class OverlayService : Service() {
         val m = resources.displayMetrics
         d = m.density
         larguraTela = m.widthPixels
+        alturaTela = m.heightPixels
         // Em tela estreita (retrato) a janela inteira é reduzida para caber
         escala = min(1f, 0.96f * larguraTela / (560 * d))
 
@@ -567,6 +580,10 @@ class OverlayService : Service() {
         estado = Estado(pasta)
         estado.onToggleArquivos = { if (janelaArquivos != null) fecharArquivos() else abrirArquivos() }
         estado.onFecharArquivos = { fecharArquivos() }
+        estado.onAnexar = { anexar() }
+        estado.onJanelaUi = { t, x -> abrirUi(t, x) }
+        estado.onToggleOutput = { if (janelaOutput != null) fecharOutput() else abrirOutput() }
+        estado.onFecharOutput = { fecharOutput() }
 
         val w = (560 * d * escala).roundToInt()
         val h = (245 * d * escala).roundToInt()
@@ -607,6 +624,103 @@ class OverlayService : Service() {
         val ver = !Overlay.oculto
         principal?.visivel(ver)
         janelaArquivos?.visivel(ver)
+        janelasUi.forEach { it.visivel(ver) }
+        janelaOutput?.visivel(ver)
+    }
+
+    // ===== Attach: conecta ao app que está aberto por baixo da janela =====
+    @Suppress("DEPRECATION")
+    private fun temAcessoDeUso(): Boolean {
+        val ops = getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+        val modo = if (Build.VERSION.SDK_INT >= 29) {
+            ops.unsafeCheckOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName)
+        } else {
+            ops.checkOpNoThrow(AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), packageName)
+        }
+        return modo == AppOpsManager.MODE_ALLOWED
+    }
+
+    @Suppress("DEPRECATION")
+    private fun appEmPrimeiroPlano(): String? {
+        val usm = getSystemService(Context.USAGE_STATS_SERVICE) as UsageStatsManager
+        val agora = System.currentTimeMillis()
+        val ev = usm.queryEvents(agora - 24L * 60 * 60 * 1000, agora)
+        val e = UsageEvents.Event()
+        var atual: String? = null
+        while (ev.hasNextEvent()) {
+            ev.getNextEvent(e)
+            if (e.eventType == UsageEvents.Event.MOVE_TO_FOREGROUND) atual = e.packageName
+            else if (e.eventType == UsageEvents.Event.MOVE_TO_BACKGROUND && e.packageName == atual) atual = null
+        }
+        val home = packageManager
+            .resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), 0)
+            ?.activityInfo?.packageName
+        return atual?.takeIf { it != packageName && it != home && it != "com.android.systemui" }
+    }
+
+    private fun anexar() {
+        if (!temAcessoDeUso()) {
+            estado.mostrarErro("Ative \"Acesso de uso\" para o Synapse A e toque em Attach de novo.")
+            startActivity(
+                Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+            return
+        }
+        val pkg = appEmPrimeiroPlano()
+        if (pkg == null) {
+            estado.mostrarErro("Abra um app primeiro para executar Lua.")
+            return
+        }
+        val nome = runCatching {
+            packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+        }.getOrDefault(pkg)
+        estado.alvo = nome
+        estado.anexado = true
+        estado.mostrarErro("Conectado com sucesso a $nome")
+        estado.log.add("[Synapse A] anexado a $nome")
+    }
+
+    // Janela de output (mesmo estilo da principal) com o log do Lua
+    private fun abrirOutput() {
+        val p = principal ?: return
+        val fw = (300 * d * escala).roundToInt()
+        val fh = (180 * d * escala).roundToInt()
+        val gap = (8 * d * escala).roundToInt()
+        val x = p.posX.coerceIn(0, maxOf(0, larguraTela - fw))
+        var y = p.posY + p.h + gap
+        if (y + fh > alturaTela) y = maxOf(0, p.posY - fh - gap)
+        val arrasto = Arrasto()
+        janelaOutput = Flutuante(fw, fh, x, y, arrasto) {
+            Escalado(escala) { JanelaOutput(estado, arrasto) }
+        }
+        janelaOutput?.visivel(!Overlay.oculto)
+    }
+
+    private fun fecharOutput() {
+        janelaOutput?.remover()
+        janelaOutput = null
+    }
+
+    // Janela flutuante extra criada pelo Lua com ui("título", "texto")
+    private fun abrirUi(titulo: String, texto: String) {
+        val p = principal ?: return
+        val fw = (220 * d * escala).roundToInt()
+        val fh = (150 * d * escala).roundToInt()
+        val desloc = (16 * d * escala * (janelasUi.size % 5)).roundToInt()
+        val x = (p.posX + desloc).coerceIn(0, maxOf(0, larguraTela - fw))
+        val y = p.posY + p.h + (8 * d * escala).roundToInt() + desloc
+        val arrasto = Arrasto()
+        lateinit var janela: Flutuante
+        janela = Flutuante(fw, fh, x, y, arrasto) {
+            Escalado(escala) {
+                JanelaUi(titulo, texto, arrasto) {
+                    janelasUi.remove(janela)
+                    janela.remover()
+                }
+            }
+        }
+        janela.visivel(!Overlay.oculto)
+        janelasUi.add(janela)
     }
 
     private fun fecharArquivos() {
@@ -637,6 +751,9 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        janelaOutput?.remover()
+        janelasUi.forEach { it.remover() }
+        janelasUi.clear()
         janelaArquivos?.remover()
         principal?.remover()
         dono.destruir()
@@ -764,6 +881,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -791,7 +909,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.os.Handler
+import android.os.Looper
 import kotlinx.coroutines.delay
+import org.luaj.vm2.LuaValue
+import org.luaj.vm2.lib.TwoArgFunction
 import kotlinx.coroutines.launch
 import org.luaj.vm2.LuaError
 import org.luaj.vm2.lib.jse.JsePlatform
@@ -836,6 +958,11 @@ class Estado(val pasta: File) {
 
     var onToggleArquivos: () -> Unit = {}
     var onFecharArquivos: () -> Unit = {}
+    var alvo by mutableStateOf<String?>(null)
+    var onAnexar: () -> Unit = {}
+    var onToggleOutput: () -> Unit = {}
+    var onFecharOutput: () -> Unit = {}
+    var onJanelaUi: (String, String) -> Unit = { _, _ -> }
 
     fun mostrarErro(m: String) {
         erro = if (m.length > 110) m.take(107) + "..." else m
@@ -865,6 +992,16 @@ class Estado(val pasta: File) {
         val g = JsePlatform.standardGlobals()
         val saida = ByteArrayOutputStream()
         g.STDOUT = PrintStream(saida, true)
+        // ui("texto") ou ui("título", "texto"): mostra o resultado como janela flutuante
+        g.set("ui", object : TwoArgFunction() {
+            override fun call(a: LuaValue, b: LuaValue): LuaValue {
+                val titulo = if (b.isnil()) "Synapse A" else a.tojstring()
+                val texto = if (b.isnil()) a.tojstring() else b.tojstring()
+                Handler(Looper.getMainLooper()).post { onJanelaUi(titulo, texto) }
+                return LuaValue.NIL
+            }
+        })
+        g.set("alvo", LuaValue.valueOf(alvo.orEmpty()))
         val fn = try {
             g.load(codigo, "script")
         } catch (e: LuaError) {
@@ -1025,6 +1162,7 @@ fun Bloco(est: Estado, arrasto: Arrasto) {
             if (t.isNotEmpty()) est.executar(t)
         })
         Botao("Open File", 244, 68, est.exige { est.onToggleArquivos() })
+        Botao("Output", 388, 90) { est.onToggleOutput() }
         Botao(est.textoSave, 316, 68, est.exige {
             est.textoSave = if (est.salvarAtiva()) "Saved!" else "Error"
             scope.launch {
@@ -1033,10 +1171,11 @@ fun Bloco(est: Estado, arrasto: Arrasto) {
             }
         })
         Botao(if (est.anexado) "Attached" else "Attach", 482, 68) {
-            if (!est.anexado) {
-                est.anexado = true
-                est.erro = null
-            }
+            if (est.anexado) {
+                est.anexado = false
+                est.alvo = null
+                est.log.add("[Synapse A] desanexado")
+            } else est.onAnexar()
         }
 
         // Popup de erro
@@ -1168,6 +1307,66 @@ fun JanelaArquivos(est: Estado, arrasto: Arrasto) {
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+fun JanelaUi(titulo: String, texto: String, arrasto: Arrasto, onFechar: () -> Unit) {
+    Box(Modifier.size(220.dp, 150.dp).background(C40)) {
+        Box(Modifier.fillMaxWidth().height(26.dp).vGrad(C40, C12).arrastar(arrasto)) {
+            Text(
+                titulo, color = Color.White, fontSize = 13.sp, maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.align(Alignment.Center).padding(horizontal = 28.dp)
+            )
+            Text(
+                "×", color = Color(0xFFC8C8C8), fontSize = 20.sp, textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .width(26.dp)
+                    .clickable { onFechar() }
+            )
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).offset(y = 26.dp).background(C70))
+        Box(Modifier.offset(6.dp, 32.dp).size(208.dp, 112.dp).vGrad(C25, C38).borda()) {
+            Text(
+                texto, color = Color.White, fontSize = 13.sp,
+                modifier = Modifier.verticalScroll(rememberScrollState()).padding(6.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun JanelaOutput(est: Estado, arrasto: Arrasto) {
+    val rolagem = rememberScrollState()
+    LaunchedEffect(est.log.size) { rolagem.scrollTo(rolagem.maxValue) }
+    Box(Modifier.size(300.dp, 180.dp).background(C40)) {
+        Box(Modifier.size(300.dp, 32.dp).vGrad(C40, C12).arrastar(arrasto)) {
+            Text(
+                "output", color = Color.White, fontSize = 14.sp,
+                modifier = Modifier.align(Alignment.Center)
+            )
+            val ic = iconeBitmap
+            if (ic != null) {
+                Image(ic, "Synapse A", Modifier.offset(5.dp, 3.dp).size(26.dp))
+            }
+            Text(
+                "×", color = Color(0xFFC8C8C8), fontSize = 20.sp, textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .align(Alignment.CenterEnd)
+                    .width(32.dp)
+                    .clickable { est.onFecharOutput() }
+            )
+        }
+        Box(Modifier.offset(y = 32.dp).size(300.dp, 1.dp).background(C70))
+        Box(Modifier.offset(6.dp, 38.dp).size(288.dp, 136.dp).vGrad(C25, C38).borda()) {
+            Text(
+                est.log.joinToString("\n"), color = Color(0xFFCFCFCF),
+                fontSize = 10.sp, fontFamily = FontFamily.Monospace,
+                modifier = Modifier.fillMaxSize().verticalScroll(rolagem).padding(6.dp)
+            )
         }
     }
 }
